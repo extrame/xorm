@@ -558,6 +558,13 @@ func (engine *Engine) Decr(column string, arg ...interface{}) *Session {
 	return session.Decr(column, arg...)
 }
 
+// Method SetExpr provides a update string like "column = {expression}"
+func (engine *Engine) SetExpr(column string, expression string) *Session {
+	session := engine.NewSession()
+	session.IsAutoClose = true
+	return session.SetExpr(column, expression)
+}
+
 // Temporarily change the Get, Find, Update's table
 func (engine *Engine) Table(tableNameOrBean interface{}) *Session {
 	session := engine.NewSession()
@@ -959,35 +966,16 @@ func (engine *Engine) mapping(beans ...interface{}) (e error) {
 
 // If a table has any reocrd
 func (engine *Engine) IsTableEmpty(bean interface{}) (bool, error) {
-	v := rValue(bean)
-	t := v.Type()
-	if t.Kind() != reflect.Struct {
-		return false, errors.New("bean should be a struct or struct's point")
-	}
-	engine.autoMapType(v)
 	session := engine.NewSession()
 	defer session.Close()
-	rows, err := session.Count(bean)
-	return rows == 0, err
+	return session.IsTableEmpty(bean)
 }
 
 // If a table is exist
-func (engine *Engine) IsTableExist(bean interface{}) (bool, error) {
-	v := rValue(bean)
-	var tableName string
-	if v.Type().Kind() == reflect.String {
-		tableName = bean.(string)
-	} else if v.Type().Kind() == reflect.Struct {
-		table := engine.autoMapType(v)
-		tableName = table.Name
-	} else {
-		return false, errors.New("bean should be a struct or struct's point")
-	}
-
+func (engine *Engine) IsTableExist(beanOrTableName interface{}) (bool, error) {
 	session := engine.NewSession()
 	defer session.Close()
-	has, err := session.isTableExist(tableName)
-	return has, err
+	return session.IsTableExist(beanOrTableName)
 }
 
 func (engine *Engine) IdOf(bean interface{}) core.PK {
@@ -1109,7 +1097,7 @@ func (engine *Engine) Sync(beans ...interface{}) error {
 				session := engine.NewSession()
 				session.Statement.RefTable = table
 				defer session.Close()
-				isExist, err := session.isColumnExist(table.Name, col)
+				isExist, err := session.Engine.dialect.IsColumnExist(table.Name, col)
 				if err != nil {
 					return err
 				}
@@ -1256,13 +1244,6 @@ func (engine *Engine) Query(sql string, paramStr ...interface{}) (resultsSlice [
 	session := engine.NewSession()
 	defer session.Close()
 	return session.Query(sql, paramStr...)
-}
-
-// Exec a raw sql and return records as []map[string]string
-func (engine *Engine) Q(sql string, paramStr ...interface{}) (resultsSlice []map[string]string, err error) {
-	session := engine.NewSession()
-	defer session.Close()
-	return session.Q(sql, paramStr...)
 }
 
 // Insert one or more records

@@ -158,6 +158,12 @@ func (session *Session) Decr(column string, arg ...interface{}) *Session {
 	return session
 }
 
+// Method SetExpr provides a query string like "column = {expression}"
+func (session *Session) SetExpr(column string, expression string) *Session {
+	session.Statement.SetExpr(column, expression)
+	return session
+}
+
 // Method Cols provides some columns to special
 func (session *Session) Cols(columns ...string) *Session {
 	session.Statement.Cols(columns...)
@@ -747,11 +753,6 @@ func (session *Session) cacheFind(t reflect.Type, sqlStr string, rowsSlicePtr in
 		return ErrCacheFailed
 	}
 
-	// TODO: remove this after multi pk supported
-	/*if len(session.Statement.RefTable.PrimaryKeys) != 1 {
-		return ErrCacheFailed
-	}*/
-
 	for _, filter := range session.Engine.dialect.Filters() {
 		sqlStr = filter.Do(sqlStr, session.Engine.dialect, session.Statement.RefTable)
 	}
@@ -909,32 +910,27 @@ func (session *Session) cacheFind(t reflect.Type, sqlStr string, rowsSlicePtr in
 				sliceValue.Set(reflect.Append(sliceValue, reflect.Indirect(reflect.ValueOf(bean))))
 			}
 		} else if sliceValue.Kind() == reflect.Map {
-			var key core.PK
-			if table.PrimaryKeys[0] != "" {
-				key = ids[j]
-			}
-
+			var key core.PK = ids[j]
+			keyType := sliceValue.Type().Key()
+			var ikey interface{}
 			if len(key) == 1 {
-				ikey, err := strconv.ParseInt(fmt.Sprintf("%v", key[0]), 10, 64)
+				ikey, err = Atot(fmt.Sprintf("%v", key[0]), keyType)
 				if err != nil {
 					return err
 				}
-				if t.Kind() == reflect.Ptr {
-					sliceValue.SetMapIndex(reflect.ValueOf(ikey), reflect.ValueOf(bean))
-				} else {
-					sliceValue.SetMapIndex(reflect.ValueOf(ikey), reflect.Indirect(reflect.ValueOf(bean)))
-				}
 			} else {
-				return errors.New("table have multiple primary keys")
+				if keyType.Kind() != reflect.Slice {
+					return errors.New("table have multiple primary keys, key is not core.PK or slice")
+				}
+				ikey = key
+			}
+
+			if t.Kind() == reflect.Ptr {
+				sliceValue.SetMapIndex(reflect.ValueOf(ikey), reflect.ValueOf(bean))
+			} else {
+				sliceValue.SetMapIndex(reflect.ValueOf(ikey), reflect.Indirect(reflect.ValueOf(bean)))
 			}
 		}
-		/*} else {
-		    session.Engine.LogDebug("[xorm:cacheFind] cache delete:", tableName, ides[j])
-		    cacher.DelBean(tableName, ids[j])
-
-		    session.Engine.LogDebug("[xorm:cacheFind] cache clear:", tableName)
-		    cacher.ClearIds(tableName)
-		}*/
 	}
 
 	return nil
@@ -1095,6 +1091,75 @@ func (session *Session) Count(bean interface{}) (int64, error) {
 	return int64(total), err
 }
 
+func Atot(s string, tp reflect.Type) (interface{}, error) {
+	var err error
+	var result interface{}
+	switch tp.Kind() {
+	case reflect.Int:
+		result, err = strconv.Atoi(s)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as int: " + err.Error())
+		}
+	case reflect.Int8:
+		x, err := strconv.Atoi(s)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as int16: " + err.Error())
+		}
+		result = int8(x)
+	case reflect.Int16:
+		x, err := strconv.Atoi(s)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as int16: " + err.Error())
+		}
+		result = int16(x)
+	case reflect.Int32:
+		x, err := strconv.Atoi(s)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as int32: " + err.Error())
+		}
+		result = int32(x)
+	case reflect.Int64:
+		result, err = strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as int64: " + err.Error())
+		}
+	case reflect.Uint:
+		x, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as uint: " + err.Error())
+		}
+		result = uint(x)
+	case reflect.Uint8:
+		x, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as uint8: " + err.Error())
+		}
+		result = uint8(x)
+	case reflect.Uint16:
+		x, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as uint16: " + err.Error())
+		}
+		result = uint16(x)
+	case reflect.Uint32:
+		x, err := strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as uint32: " + err.Error())
+		}
+		result = uint32(x)
+	case reflect.Uint64:
+		result, err = strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			return nil, errors.New("convert " + s + " as uint64: " + err.Error())
+		}
+	case reflect.String:
+		result = s
+	default:
+		panic("unsupported convert type")
+	}
+	return result, nil
+}
+
 // Find retrieve records from table, condiBeans's non-empty fields
 // are conditions. beans could be []Struct, []*Struct, map[int64]Struct
 // map[int64]*Struct
@@ -1143,10 +1208,9 @@ func (session *Session) Find(rowsSlicePtr interface{}, condiBean ...interface{})
 	} else {
 		// !oinume! Add "<col> IS NULL" to WHERE whatever condiBean is given.
 		// See https://github.com/go-xorm/xorm/issues/179
-		for _, col := range table.Columns() {
-			if col.IsDeleted && !session.Statement.unscoped { // tag "deleted" is enabled
-				session.Statement.ConditionStr = fmt.Sprintf("(%v IS NULL or %v = '0001-01-01 00:00:00') ", session.Engine.Quote(col.Name), session.Engine.Quote(col.Name))
-			}
+		if col := table.DeletedColumn(); col != nil && !session.Statement.unscoped { // tag "deleted" is enabled
+			session.Statement.ConditionStr = fmt.Sprintf("(%v IS NULL or %v = '0001-01-01 00:00:00') ",
+				session.Engine.Quote(col.Name), session.Engine.Quote(col.Name))
 		}
 	}
 
@@ -1259,7 +1323,9 @@ func (session *Session) Find(rowsSlicePtr interface{}, condiBean ...interface{})
 			return err
 		}
 
-		for i, results := range resultsSlice {
+		keyType := sliceValue.Type().Key()
+
+		for _, results := range resultsSlice {
 			var newValue reflect.Value
 			if sliceElementType.Kind() == reflect.Ptr {
 				newValue = reflect.New(sliceElementType.Elem())
@@ -1270,18 +1336,29 @@ func (session *Session) Find(rowsSlicePtr interface{}, condiBean ...interface{})
 			if err != nil {
 				return err
 			}
-			var key int64
+			var key interface{}
 			// if there is only one pk, we can put the id as map key.
-			// TODO: should know if the column is ints
 			if len(table.PrimaryKeys) == 1 {
-				x, err := strconv.ParseInt(string(results[table.PrimaryKeys[0]]), 10, 64)
+				key, err = Atot(string(results[table.PrimaryKeys[0]]), keyType)
 				if err != nil {
-					return errors.New("pk " + table.PrimaryKeys[0] + " as int64: " + err.Error())
+					return err
 				}
-				key = x
 			} else {
-				key = int64(i)
+				if keyType.Kind() != reflect.Slice {
+					panic("don't support multiple primary key's map has non-slice key type")
+				} else {
+					keys := core.PK{}
+					for _, pk := range table.PrimaryKeys {
+						skey, err := Atot(string(results[pk]), keyType)
+						if err != nil {
+							return err
+						}
+						keys = append(keys, skey)
+					}
+					key = keys
+				}
 			}
+
 			if sliceElementType.Kind() == reflect.Ptr {
 				sliceValue.SetMapIndex(reflect.ValueOf(key), reflect.ValueOf(newValue.Interface()))
 			} else {
@@ -1320,6 +1397,7 @@ func (session *Session) Ping() error {
 	return session.Db.Ping()
 }
 
+/*
 func (session *Session) isColumnExist(tableName string, col *core.Column) (bool, error) {
 	err := session.newDb()
 	if err != nil {
@@ -1333,6 +1411,21 @@ func (session *Session) isColumnExist(tableName string, col *core.Column) (bool,
 	//sqlStr, args := session.Engine.dialect.ColumnCheckSql(tableName, colName)
 	//results, err := session.query(sqlStr, args...)
 	//return len(results) > 0, err
+}*/
+
+func (session *Session) IsTableExist(beanOrTableName interface{}) (bool, error) {
+	v := rValue(beanOrTableName)
+	var tableName string
+	if v.Type().Kind() == reflect.String {
+		tableName = beanOrTableName.(string)
+	} else if v.Type().Kind() == reflect.Struct {
+		table := session.Engine.autoMapType(v)
+		tableName = table.Name
+	} else {
+		return false, errors.New("bean should be a struct or struct's point")
+	}
+
+	return session.isTableExist(tableName)
 }
 
 func (session *Session) isTableExist(tableName string) (bool, error) {
@@ -1347,6 +1440,34 @@ func (session *Session) isTableExist(tableName string) (bool, error) {
 	sqlStr, args := session.Engine.dialect.TableCheckSql(tableName)
 	results, err := session.query(sqlStr, args...)
 	return len(results) > 0, err
+}
+
+func (session *Session) IsTableEmpty(bean interface{}) (bool, error) {
+	v := rValue(bean)
+	t := v.Type()
+
+	if t.Kind() == reflect.String {
+		return session.isTableEmpty(bean.(string))
+	} else if t.Kind() == reflect.Struct {
+		session.Engine.autoMapType(v)
+		rows, err := session.Count(bean)
+		return rows == 0, err
+	}
+	return false, errors.New("bean should be a struct or struct's point")
+}
+
+func (session *Session) isTableEmpty(tableName string) (bool, error) {
+	session.newDb()
+
+	row := session.Db.QueryRow(fmt.Sprintf("select count(*) from %s", tableName))
+
+	var total int64
+	err := row.Scan(&total)
+	if err != nil {
+		return true, err
+	}
+
+	return total == 0, nil
 }
 
 func (session *Session) isIndexExist(tableName, idxName string, unique bool) (bool, error) {
@@ -1456,62 +1577,6 @@ func (session *Session) dropAll() error {
 		}
 	}
 	return nil
-}
-
-func row2mapStr(rows *core.Rows, fields []string) (resultsMap map[string]string, err error) {
-	result := make(map[string]string)
-	scanResultContainers := make([]interface{}, len(fields))
-	for i := 0; i < len(fields); i++ {
-		var scanResultContainer interface{}
-		scanResultContainers[i] = &scanResultContainer
-	}
-	if err := rows.Scan(scanResultContainers...); err != nil {
-		return nil, err
-	}
-
-	for ii, key := range fields {
-		rawValue := reflect.Indirect(reflect.ValueOf(scanResultContainers[ii]))
-		//if row is null then ignore
-		if rawValue.Interface() == nil {
-			//fmt.Println("ignore ...", key, rawValue)
-			continue
-		}
-
-		if data, err := value2String(&rawValue); err == nil {
-			result[key] = data
-		} else {
-			return nil, err // !nashtsai! REVIEW, should return err or just error log?
-		}
-	}
-	return result, nil
-}
-
-func row2map(rows *core.Rows, fields []string) (resultsMap map[string][]byte, err error) {
-	result := make(map[string][]byte)
-	scanResultContainers := make([]interface{}, len(fields))
-	for i := 0; i < len(fields); i++ {
-		var scanResultContainer interface{}
-		scanResultContainers[i] = &scanResultContainer
-	}
-	if err := rows.Scan(scanResultContainers...); err != nil {
-		return nil, err
-	}
-
-	for ii, key := range fields {
-		rawValue := reflect.Indirect(reflect.ValueOf(scanResultContainers[ii]))
-		//if row is null then ignore
-		if rawValue.Interface() == nil {
-			//fmt.Println("ignore ...", key, rawValue)
-			continue
-		}
-
-		if data, err := value2Bytes(&rawValue); err == nil {
-			result[key] = data
-		} else {
-			return nil, err // !nashtsai! REVIEW, should return err or just error log?
-		}
-	}
-	return result, nil
 }
 
 func (session *Session) getField(dataStruct *reflect.Value, key string, table *core.Table, idx int) *reflect.Value {
@@ -1898,7 +1963,6 @@ func (session *Session) txQuery(tx *core.Tx, sqlStr string, params ...interface{
 }
 
 func (session *Session) innerQuery(db *core.DB, sqlStr string, params ...interface{}) (resultsSlice []map[string][]byte, err error) {
-
 	stmt, rows, err := session.Engine.LogSQLQueryTime(sqlStr, params, func() (*core.Stmt, *core.Rows, error) {
 		stmt, err := db.Prepare(sqlStr)
 		if err != nil {
@@ -1946,43 +2010,6 @@ func (session *Session) query2(sqlStr string, paramStr ...interface{}) (resultsS
 	return txQuery2(session.Tx, sqlStr, paramStr...)
 }
 
-func txQuery2(tx *core.Tx, sqlStr string, params ...interface{}) (resultsSlice []map[string]string, err error) {
-	rows, err := tx.Query(sqlStr, params...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	return rows2Strings(rows)
-}
-
-func query2(db *core.DB, sqlStr string, params ...interface{}) (resultsSlice []map[string]string, err error) {
-	s, err := db.Prepare(sqlStr)
-	if err != nil {
-		return nil, err
-	}
-	defer s.Close()
-	rows, err := s.Query(params...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return rows2Strings(rows)
-}
-
-// Exec a raw sql and return records as []map[string]string
-func (session *Session) Q(sqlStr string, paramStr ...interface{}) (resultsSlice []map[string]string, err error) {
-	err = session.newDb()
-	if err != nil {
-		return nil, err
-	}
-	defer session.resetStatement()
-	if session.IsAutoClose {
-		defer session.Close()
-	}
-	return session.query2(sqlStr, paramStr...)
-}
-
 // insert one or more beans
 func (session *Session) Insert(beans ...interface{}) (int64, error) {
 	var affected int64 = 0
@@ -1999,20 +2026,22 @@ func (session *Session) Insert(beans ...interface{}) (int64, error) {
 	for _, bean := range beans {
 		sliceValue := reflect.Indirect(reflect.ValueOf(bean))
 		if sliceValue.Kind() == reflect.Slice {
-			if session.Engine.SupportInsertMany() {
-				cnt, err := session.innerInsertMulti(bean)
-				if err != nil {
-					return affected, err
-				}
-				affected += cnt
-			} else {
-				size := sliceValue.Len()
-				for i := 0; i < size; i++ {
-					cnt, err := session.innerInsert(sliceValue.Index(i).Interface())
+			size := sliceValue.Len()
+			if size > 0 {
+				if session.Engine.SupportInsertMany() {
+					cnt, err := session.innerInsertMulti(bean)
 					if err != nil {
 						return affected, err
 					}
 					affected += cnt
+				} else {
+					for i := 0; i < size; i++ {
+						cnt, err := session.innerInsert(sliceValue.Index(i).Interface())
+						if err != nil {
+							return affected, err
+						}
+						affected += cnt
+					}
 				}
 			}
 		} else {
@@ -2071,8 +2100,16 @@ func (session *Session) innerInsertMulti(rowsSlicePtr interface{}) (int64, error
 				if col.MapType == core.ONLYFROMDB {
 					continue
 				}
+				if col.IsDeleted {
+					continue
+				}
 				if session.Statement.ColumnStr != "" {
 					if _, ok := session.Statement.columnMap[col.Name]; !ok {
+						continue
+					}
+				}
+				if session.Statement.OmitStr != "" {
+					if _, ok := session.Statement.columnMap[col.Name]; ok {
 						continue
 					}
 				}
@@ -2099,8 +2136,16 @@ func (session *Session) innerInsertMulti(rowsSlicePtr interface{}) (int64, error
 				if col.MapType == core.ONLYFROMDB {
 					continue
 				}
+				if col.IsDeleted {
+					continue
+				}
 				if session.Statement.ColumnStr != "" {
 					if _, ok := session.Statement.columnMap[col.Name]; !ok {
+						continue
+					}
+				}
+				if session.Statement.OmitStr != "" {
+					if _, ok := session.Statement.columnMap[col.Name]; ok {
 						continue
 					}
 				}
@@ -2173,16 +2218,24 @@ func (session *Session) innerInsertMulti(rowsSlicePtr interface{}) (int64, error
 
 // Insert multiple records
 func (session *Session) InsertMulti(rowsSlicePtr interface{}) (int64, error) {
-	err := session.newDb()
-	if err != nil {
-		return 0, err
+	sliceValue := reflect.Indirect(reflect.ValueOf(rowsSlicePtr))
+	if sliceValue.Kind() == reflect.Slice {
+		if sliceValue.Len() > 0 {
+			err := session.newDb()
+			if err != nil {
+				return 0, err
+			}
+			defer session.resetStatement()
+			if session.IsAutoClose {
+				defer session.Close()
+			}
+			return session.innerInsertMulti(rowsSlicePtr)
+		} else {
+			return 0, nil
+		}
+	} else {
+		return 0, ErrParamsType
 	}
-	defer session.resetStatement()
-	if session.IsAutoClose {
-		defer session.Close()
-	}
-
-	return session.innerInsertMulti(rowsSlicePtr)
 }
 
 func (session *Session) byte2Time(col *core.Column, data []byte) (outTime time.Time, outErr error) {
@@ -2804,8 +2857,29 @@ func (session *Session) innerInsert(bean interface{}) (int64, error) {
 		return 0, err
 	}
 
-	colPlaces := strings.Repeat("?, ", len(colNames))
-	colPlaces = colPlaces[0 : len(colPlaces)-2]
+	// insert expr columns, override if exists
+	exprColumns := session.Statement.getExpr()
+	exprColVals := make([]string, 0, len(exprColumns))
+	for _, v := range exprColumns {
+		// remove the expr columns
+		for i, colName := range colNames {
+			if colName == v.colName {
+				colNames = append(colNames[:i], colNames[i+1:]...)
+				args = append(args[:i], args[i+1:]...)
+			}
+		}
+
+		// append expr column to the end
+		colNames = append(colNames, v.colName)
+		exprColVals = append(exprColVals, v.expr)
+	}
+
+	colPlaces := strings.Repeat("?, ", len(colNames)-len(exprColumns))
+	if len(exprColVals) > 0 {
+		colPlaces = colPlaces + strings.Join(exprColVals, ", ")
+	} else {
+		colPlaces = colPlaces[0 : len(colPlaces)-2]
+	}
 
 	sqlStr := fmt.Sprintf("INSERT INTO %v%v%v (%v%v%v) VALUES (%v)",
 		session.Engine.QuoteStr(),
@@ -3239,6 +3313,11 @@ func (session *Session) Update(bean interface{}, condiBean ...interface{}) (int6
 	for _, v := range decColumns {
 		colNames = append(colNames, session.Engine.Quote(v.colName)+" = "+session.Engine.Quote(v.colName)+" - ?")
 		args = append(args, v.arg)
+	}
+	//for update action to like "column = expression"
+	exprColumns := session.Statement.getExpr()
+	for _, v := range exprColumns {
+		colNames = append(colNames, session.Engine.Quote(v.colName)+" = "+v.expr)
 	}
 
 	var condiColNames []string
@@ -3715,80 +3794,4 @@ func (s *Session) Sync2(beans ...interface{}) error {
 func (session *Session) Unscoped() *Session {
 	session.Statement.Unscoped()
 	return session
-}
-
-func genCols(table *core.Table, session *Session, bean interface{}, useCol bool, includeQuote bool) ([]string, []interface{}, error) {
-	colNames := make([]string, 0)
-	args := make([]interface{}, 0)
-
-	for _, col := range table.Columns() {
-		lColName := strings.ToLower(col.Name)
-		if useCol && !col.IsVersion && !col.IsCreated && !col.IsUpdated {
-			if _, ok := session.Statement.columnMap[lColName]; !ok {
-				continue
-			}
-		}
-		if col.MapType == core.ONLYFROMDB {
-			continue
-		}
-
-		fieldValuePtr, err := col.ValueOf(bean)
-		if err != nil {
-			session.Engine.LogError(err)
-			continue
-		}
-		fieldValue := *fieldValuePtr
-
-		if col.IsAutoIncrement {
-			switch fieldValue.Type().Kind() {
-			case reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int, reflect.Int64:
-				if fieldValue.Int() == 0 {
-					continue
-				}
-			case reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint, reflect.Uint64:
-				if fieldValue.Uint() == 0 {
-					continue
-				}
-			case reflect.String:
-				if len(fieldValue.String()) == 0 {
-					continue
-				}
-			}
-		}
-
-		if col.IsDeleted {
-			continue
-		}
-
-		if session.Statement.ColumnStr != "" {
-			if _, ok := session.Statement.columnMap[lColName]; !ok {
-				continue
-			}
-		}
-		if session.Statement.OmitStr != "" {
-			if _, ok := session.Statement.columnMap[lColName]; ok {
-				continue
-			}
-		}
-
-		if (col.IsCreated || col.IsUpdated) && session.Statement.UseAutoTime {
-			args = append(args, session.Engine.NowTime(col.SQLType.Name))
-		} else if col.IsVersion && session.Statement.checkVersion {
-			args = append(args, 1)
-			//} else if !col.DefaultIsEmpty {
-		} else {
-			arg, err := session.value2Interface(col, fieldValue)
-			if err != nil {
-				return colNames, args, err
-			}
-			args = append(args, arg)
-		}
-
-		if includeQuote {
-			colNames = append(colNames, session.Engine.Quote(col.Name)+" = ?")
-		} else {
-			colNames = append(colNames, col.Name)
-		}
-	}
-	return colNames, args, nil
 }

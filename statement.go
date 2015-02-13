@@ -26,6 +26,11 @@ type decrParam struct {
 	arg     interface{}
 }
 
+type exprParam struct {
+	colName string
+	expr    string
+}
+
 // statement save all the sql info for executing SQL
 type Statement struct {
 	RefTable      *core.Table
@@ -63,6 +68,7 @@ type Statement struct {
 	inColumns     map[string]*inParam
 	incrColumns   map[string]incrParam
 	decrColumns   map[string]decrParam
+	exprColumns   map[string]exprParam
 }
 
 // init
@@ -98,6 +104,7 @@ func (statement *Statement) Init() {
 	statement.inColumns = make(map[string]*inParam)
 	statement.incrColumns = make(map[string]incrParam)
 	statement.decrColumns = make(map[string]decrParam)
+	statement.exprColumns = make(map[string]exprParam)
 }
 
 // add the raw sql statement
@@ -153,9 +160,6 @@ func (statement *Statement) Table(tableNameOrBean interface{}) *Statement {
 	t := v.Type()
 	if t.Kind() == reflect.String {
 		statement.AltTableName = tableNameOrBean.(string)
-		if statement.AltTableName[0] == '~' {
-			statement.AltTableName = statement.Engine.TableMapper.TableName(statement.AltTableName[1:])
-		}
 	} else if t.Kind() == reflect.Struct {
 		statement.RefTable = statement.Engine.autoMapType(v)
 	}
@@ -716,6 +720,13 @@ func (statement *Statement) Decr(column string, arg ...interface{}) *Statement {
 	return statement
 }
 
+// Generate  "Update ... Set column = {expression}" statment
+func (statement *Statement) SetExpr(column string, expression string) *Statement {
+	k := strings.ToLower(column)
+	statement.exprColumns[k] = exprParam{column, expression}
+	return statement
+}
+
 // Generate  "Update ... Set column = column + arg" statment
 func (statement *Statement) getInc() map[string]incrParam {
 	return statement.incrColumns
@@ -724,6 +735,11 @@ func (statement *Statement) getInc() map[string]incrParam {
 // Generate  "Update ... Set column = column - arg" statment
 func (statement *Statement) getDec() map[string]decrParam {
 	return statement.decrColumns
+}
+
+// Generate  "Update ... Set column = {expression}" statment
+func (statement *Statement) getExpr() map[string]exprParam {
+	return statement.exprColumns
 }
 
 // Generate "Where column IN (?) " statment
@@ -941,15 +957,9 @@ func (statement *Statement) Join(join_operator string, tablename interface{}, co
 		l := len(t)
 		if l > 1 {
 			table := t[0]
-			if table[0] == '~' {
-				table = statement.Engine.TableMapper.TableName(table[1:])
-			}
 			joinTable = statement.Engine.Quote(table) + " AS " + statement.Engine.Quote(t[1])
 		} else if l == 1 {
 			table := t[0]
-			if table[0] == '~' {
-				table = statement.Engine.TableMapper.TableName(table[1:])
-			}
 			joinTable = statement.Engine.Quote(table)
 		}
 	case []interface{}:
@@ -962,9 +972,6 @@ func (statement *Statement) Join(join_operator string, tablename interface{}, co
 			t := v.Type()
 			if t.Kind() == reflect.String {
 				table = f.(string)
-				if table[0] == '~' {
-					table = statement.Engine.TableMapper.TableName(table[1:])
-				}
 			} else if t.Kind() == reflect.Struct {
 				r := statement.Engine.autoMapType(v)
 				table = r.Name
@@ -977,9 +984,6 @@ func (statement *Statement) Join(join_operator string, tablename interface{}, co
 		}
 	default:
 		t := fmt.Sprintf("%v", tablename)
-		if t[0] == '~' {
-			t = statement.Engine.TableMapper.TableName(t[1:])
-		}
 		joinTable = statement.Engine.Quote(t)
 	}
 	if statement.JoinStr != "" {
@@ -1183,7 +1187,9 @@ func (statement *Statement) genCountSql(bean interface{}) (string, []interface{}
 
 func (statement *Statement) genSelectSql(columnStr string) (a string) {
 	if statement.GroupByStr != "" {
-		columnStr = statement.Engine.Quote(strings.Replace(statement.GroupByStr, ",", statement.Engine.Quote(","), -1))
+		if columnStr == "" {
+			columnStr = statement.Engine.Quote(strings.Replace(statement.GroupByStr, ",", statement.Engine.Quote(","), -1))
+		}
 		statement.GroupByStr = columnStr
 	}
 	var distinct string
@@ -1233,8 +1239,16 @@ func (statement *Statement) genSelectSql(columnStr string) (a string) {
 					column = statement.RefTable.ColumnsSeq()[0]
 				}
 			}
-			mssqlCondi = fmt.Sprintf("(%s NOT IN (SELECT TOP %d %s%s%s))",
-				column, statement.Start, column, fromStr, whereStr)
+			var orderStr string
+			if len(statement.OrderStr) > 0 {
+				orderStr = " ORDER BY " + statement.OrderStr
+			}
+			var groupStr string
+			if len(statement.GroupByStr) > 0 {
+				groupStr = " GROUP BY " + statement.GroupByStr
+			}
+			mssqlCondi = fmt.Sprintf("(%s NOT IN (SELECT TOP %d %s%s%s%s%s))",
+				column, statement.Start, column, fromStr, whereStr, orderStr, groupStr)
 		}
 	}
 
